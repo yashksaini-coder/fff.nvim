@@ -199,7 +199,7 @@ local function apply_match_highlights(item, ctx, item_idx, buf, ns_id, row, line
   if item.is_definition then
     pcall(vim.api.nvim_buf_set_extmark, buf, ns_id, row, 0, {
       virt_text = { { ' [def]', config.hl.combo_header or 'Number' } },
-      virt_text_pos = 'eol',
+      virt_text_pos = 'right_align',
       priority = 250,
     })
   end
