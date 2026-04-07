@@ -1,9 +1,11 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use fff::file_picker::{FFFMode, FilePicker};
-use fff::types::{FileItem, PaginationArgs};
-use fff::{FuzzySearchOptions, QueryParser, SharedFrecency, SharedPicker};
+use fff::types::{ContentCacheBudget, FileItem, PaginationArgs};
+use fff::{
+    FilePickerOptions, FuzzySearchOptions, GrepMode, GrepSearchOptions, QueryParser,
+    SharedFrecency, SharedPicker, build_bigram_index, grep,
+};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// Initialize tracing to output to console
@@ -27,11 +29,14 @@ fn init_file_picker_internal(
     shared_frecency: &SharedFrecency,
 ) -> Result<(), String> {
     FilePicker::new_with_shared_state(
-        path.to_string(),
-        false,
-        FFFMode::Neovim,
-        Arc::clone(shared_picker),
-        Arc::clone(shared_frecency),
+        shared_picker.clone(),
+        shared_frecency.clone(),
+        FilePickerOptions {
+            base_path: path.to_string(),
+            warmup_mmap_cache: false,
+            mode: FFFMode::Neovim,
+            ..Default::default()
+        },
     )
     .map_err(|e| format!("Failed to create FilePicker: {:?}", e))
 }
@@ -133,8 +138,8 @@ fn setup_once() -> Result<(Vec<FileItem>, SharedPicker, SharedFrecency), String>
         .map_err(|e| format!("Failed to canonicalize path: {}", e))?;
     eprintln!("  Path: {:?}", canonical_path);
 
-    let shared_picker: SharedPicker = Arc::new(RwLock::new(None));
-    let shared_frecency: SharedFrecency = Arc::new(RwLock::new(None));
+    let shared_picker = SharedPicker::default();
+    let shared_frecency = SharedFrecency::default();
 
     init_file_picker_internal(
         &canonical_path.to_string_lossy(),
@@ -179,8 +184,8 @@ fn bench_indexing(c: &mut Criterion) {
 
     group.bench_function("index_big_repo", |b| {
         b.iter(|| {
-            let sp: SharedPicker = Arc::new(RwLock::new(None));
-            let sf: SharedFrecency = Arc::new(RwLock::new(None));
+            let sp = SharedPicker::default();
+            let sf = SharedFrecency::default();
 
             let start = std::time::Instant::now();
             init_file_picker_internal(black_box(&canonical_path.to_string_lossy()), &sp, &sf)
@@ -235,11 +240,12 @@ fn bench_search_queries(c: &mut Criterion) {
                 let results = FilePicker::fuzzy_search(
                     black_box(&files),
                     black_box(&parsed),
+                    None,
                     FuzzySearchOptions {
                         max_threads: 4,
                         current_file: None,
                         project_path: None,
-                        last_same_query_match: None,
+
                         combo_boost_score_multiplier: 100,
                         min_combo_count: 3,
                         pagination: PaginationArgs {
@@ -283,11 +289,12 @@ fn bench_search_thread_scaling(c: &mut Criterion) {
                     let results = FilePicker::fuzzy_search(
                         black_box(&files),
                         black_box(&parsed),
+                        None,
                         FuzzySearchOptions {
                             max_threads: threads,
                             current_file: None,
                             project_path: None,
-                            last_same_query_match: None,
+
                             combo_boost_score_multiplier: 100,
                             min_combo_count: 3,
                             pagination: PaginationArgs {
@@ -329,11 +336,12 @@ fn bench_search_result_limits(c: &mut Criterion) {
                 let results = FilePicker::fuzzy_search(
                     black_box(&files),
                     black_box(&parsed),
+                    None,
                     FuzzySearchOptions {
                         max_threads: 4,
                         current_file: None,
                         project_path: None,
-                        last_same_query_match: None,
+
                         combo_boost_score_multiplier: 100,
                         min_combo_count: 3,
                         pagination: PaginationArgs {
@@ -387,11 +395,12 @@ fn bench_search_scalability(c: &mut Criterion) {
                 let results = FilePicker::fuzzy_search(
                     black_box(subset),
                     black_box(&parsed),
+                    None,
                     FuzzySearchOptions {
                         max_threads: 4,
                         current_file: None,
                         project_path: None,
-                        last_same_query_match: None,
+
                         combo_boost_score_multiplier: 100,
                         min_combo_count: 3,
                         pagination: PaginationArgs {
@@ -431,11 +440,12 @@ fn bench_search_ordering(c: &mut Criterion) {
             let results = FilePicker::fuzzy_search(
                 black_box(&files),
                 black_box(&parsed_controller),
+                None,
                 FuzzySearchOptions {
                     max_threads: 4,
                     current_file: None,
                     project_path: None,
-                    last_same_query_match: None,
+
                     combo_boost_score_multiplier: 100,
                     min_combo_count: 3,
                     pagination: PaginationArgs {
@@ -454,11 +464,12 @@ fn bench_search_ordering(c: &mut Criterion) {
             let results = FilePicker::fuzzy_search(
                 black_box(&files),
                 black_box(&parsed_controller),
+                None,
                 FuzzySearchOptions {
                     max_threads: 4,
                     current_file: None,
                     project_path: None,
-                    last_same_query_match: None,
+
                     combo_boost_score_multiplier: 100,
                     min_combo_count: 3,
                     pagination: PaginationArgs {
@@ -477,11 +488,12 @@ fn bench_search_ordering(c: &mut Criterion) {
             let results = FilePicker::fuzzy_search(
                 black_box(&files),
                 black_box(&parsed_mod),
+                None,
                 FuzzySearchOptions {
                     max_threads: 4,
                     current_file: None,
                     project_path: None,
-                    last_same_query_match: None,
+
                     combo_boost_score_multiplier: 100,
                     min_combo_count: 3,
                     pagination: PaginationArgs {
@@ -499,11 +511,12 @@ fn bench_search_ordering(c: &mut Criterion) {
             let results = FilePicker::fuzzy_search(
                 black_box(&files),
                 black_box(&parsed_mod),
+                None,
                 FuzzySearchOptions {
                     max_threads: 4,
                     current_file: None,
                     project_path: None,
-                    last_same_query_match: None,
+
                     combo_boost_score_multiplier: 100,
                     min_combo_count: 3,
                     pagination: PaginationArgs {
@@ -522,11 +535,12 @@ fn bench_search_ordering(c: &mut Criterion) {
             let results = FilePicker::fuzzy_search(
                 black_box(&files),
                 black_box(&parsed_controller),
+                None,
                 FuzzySearchOptions {
                     max_threads: 4,
                     current_file: None,
                     project_path: None,
-                    last_same_query_match: None,
+
                     combo_boost_score_multiplier: 100,
                     min_combo_count: 3,
                     pagination: PaginationArgs {
@@ -544,11 +558,12 @@ fn bench_search_ordering(c: &mut Criterion) {
             let results = FilePicker::fuzzy_search(
                 black_box(&files),
                 black_box(&parsed_controller),
+                None,
                 FuzzySearchOptions {
                     max_threads: 4,
                     current_file: None,
                     project_path: None,
-                    last_same_query_match: None,
+
                     combo_boost_score_multiplier: 100,
                     min_combo_count: 3,
                     pagination: PaginationArgs {
@@ -588,11 +603,12 @@ fn bench_pagination_performance(c: &mut Criterion) {
             let results = FilePicker::fuzzy_search(
                 black_box(&files),
                 black_box(&parsed),
+                None,
                 FuzzySearchOptions {
                     max_threads: 4,
                     current_file: None,
                     project_path: None,
-                    last_same_query_match: None,
+
                     combo_boost_score_multiplier: 100,
                     min_combo_count: 3,
                     pagination: PaginationArgs {
@@ -611,11 +627,12 @@ fn bench_pagination_performance(c: &mut Criterion) {
             let results = FilePicker::fuzzy_search(
                 black_box(&files),
                 black_box(&parsed),
+                None,
                 FuzzySearchOptions {
                     max_threads: 4,
                     current_file: None,
                     project_path: None,
-                    last_same_query_match: None,
+
                     combo_boost_score_multiplier: 100,
                     min_combo_count: 3,
                     pagination: PaginationArgs {
@@ -634,11 +651,12 @@ fn bench_pagination_performance(c: &mut Criterion) {
             let results = FilePicker::fuzzy_search(
                 black_box(&files),
                 black_box(&parsed),
+                None,
                 FuzzySearchOptions {
                     max_threads: 4,
                     current_file: None,
                     project_path: None,
-                    last_same_query_match: None,
+
                     combo_boost_score_multiplier: 100,
                     min_combo_count: 3,
                     pagination: PaginationArgs {
@@ -654,6 +672,90 @@ fn bench_pagination_performance(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark grep search with bigram index prefiltering
+fn bench_grep_search(c: &mut Criterion) {
+    let (files, _sp, _sf) = match setup_once() {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("Skipping grep benchmarks: {}", e);
+            return;
+        }
+    };
+
+    let budget = ContentCacheBudget::new_for_repo(files.len());
+
+    eprintln!("  Building bigram index for {} files...", files.len());
+    let start = std::time::Instant::now();
+    let (bigram_filter, _overflow_indices) = build_bigram_index(&files, &budget);
+    eprintln!(
+        "  Bigram index built in {:.2}s ({} columns)",
+        start.elapsed().as_secs_f64(),
+        bigram_filter.columns_used(),
+    );
+
+    let mut group = c.benchmark_group("grep");
+    group.sample_size(50);
+
+    let options = GrepSearchOptions {
+        max_file_size: 10 * 1024 * 1024,
+        max_matches_per_file: 0,
+        smart_case: true,
+        file_offset: 0,
+        page_limit: 100,
+        mode: GrepMode::PlainText,
+        time_budget_ms: 0,
+        before_context: 0,
+        after_context: 0,
+        classify_definitions: false,
+    };
+
+    let test_queries = vec![
+        ("common", "struct"),
+        ("specific", "DEFINE_MUTEX"),
+        ("path_filter", "*.h mutex"),
+    ];
+
+    let grep_parser = fff::QueryParser::new(fff::GrepConfig);
+
+    for (name, query) in &test_queries {
+        let parsed = grep_parser.parse(query);
+
+        // With bigram index
+        group.bench_with_input(BenchmarkId::new("with_bigram", name), query, |b, _| {
+            b.iter(|| {
+                let result = grep::grep_search(
+                    black_box(&files),
+                    black_box(&parsed),
+                    black_box(&options),
+                    &budget,
+                    Some(&bigram_filter),
+                    None,
+                    None,
+                );
+                result.matches.len()
+            });
+        });
+
+        // Without bigram index
+        group.bench_with_input(BenchmarkId::new("without_bigram", name), query, |b, _| {
+            b.iter(|| {
+                let result = grep::grep_search(
+                    black_box(&files),
+                    black_box(&parsed),
+                    black_box(&options),
+                    &budget,
+                    None,
+                    None,
+                    None,
+                );
+                result.matches.len()
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_indexing,
@@ -663,6 +765,7 @@ criterion_group!(
     bench_search_scalability,
     bench_search_ordering,
     bench_pagination_performance,
+    bench_grep_search,
 );
 
 criterion_main!(benches);

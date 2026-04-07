@@ -144,6 +144,10 @@ export interface ScanProgress {
   scannedFilesCount: number;
   /** Whether a scan is currently in progress */
   isScanning: boolean;
+  /** Whether the background file watcher is ready */
+  isWatcherReady: boolean;
+  /** Whether the warmup/bigram phase has completed */
+  isWarmupComplete: boolean;
 }
 
 /**
@@ -360,4 +364,3 @@ export interface MultiGrepOptions {
   /** Number of context lines to include after each match (default: 0) */
   afterContext?: number;
 }
-

@@ -79,6 +79,9 @@ fn plain_text_finds_exact_literal() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -102,6 +105,9 @@ fn plain_text_smart_case_insensitive() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -127,6 +133,9 @@ fn plain_text_smart_case_sensitive_with_uppercase() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -153,6 +162,9 @@ fn plain_text_regex_metacharacters_are_literal() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -165,6 +177,9 @@ fn plain_text_regex_metacharacters_are_literal() {
         &parsed2,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(result2.matches.len(), 1);
     assert_eq!(result2.matches[0].line_number, 2);
@@ -186,6 +201,9 @@ fn plain_text_dot_is_literal() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -211,6 +229,9 @@ fn plain_text_asterisk_is_literal() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(result.matches.len(), 1);
     assert_eq!(result.matches[0].line_number, 1);
@@ -231,6 +252,9 @@ fn plain_text_backslash_is_literal() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(result.matches.len(), 1);
 }
@@ -250,6 +274,9 @@ fn plain_text_across_multiple_files() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 3);
@@ -268,6 +295,9 @@ fn plain_text_highlight_offsets_are_correct() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -291,6 +321,9 @@ fn plain_text_empty_query_returns_no_content_matches() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // Empty query in grep returns git-modified welcome state (no content matches)
@@ -306,7 +339,14 @@ fn plain_text_binary_files_are_skipped() {
     content.extend_from_slice(&[0u8; 100]); // NUL bytes make it binary
     content.extend_from_slice(b"match this text\n");
     fs::write(&binary_path, &content).unwrap();
-    let binary_file = FileItem::new(binary_path, tmp.path(), None);
+    // In production, binary detection by content happens during bigram build
+    // and sets is_binary = true. Simulate that here with new_raw.
+    let meta = fs::metadata(&binary_path).unwrap();
+    let binary_file = {
+        let p = binary_path.to_string_lossy().into_owned();
+        let rs = (p.len() - "binary.dat".len()) as u16;
+        FileItem::new_raw(p, rs, rs, meta.len(), 0, None, true)
+    };
 
     let text_file = create_file(tmp.path(), "text.txt", "match this text\n");
 
@@ -318,11 +358,14 @@ fn plain_text_binary_files_are_skipped() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // Only the text file should be searched, not the binary one
     assert_eq!(result.files.len(), 1);
-    assert!(result.files[0].relative_path.contains("text.txt"));
+    assert!(result.files[0].relative_path().contains("text.txt"));
 }
 
 #[test]
@@ -338,7 +381,15 @@ fn plain_text_max_matches_per_file() {
     opts.max_matches_per_file = 5;
 
     let parsed = parse_grep_query("match_target");
-    let result = grep_search(&files, &parsed, &opts, &ContentCacheBudget::unlimited());
+    let result = grep_search(
+        &files,
+        &parsed,
+        &opts,
+        &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
+    );
 
     assert_eq!(
         result.matches.len(),
@@ -360,7 +411,15 @@ fn plain_text_page_limit() {
     opts.page_limit = 10;
 
     let parsed = parse_grep_query("target");
-    let result = grep_search(&files, &parsed, &opts, &ContentCacheBudget::unlimited());
+    let result = grep_search(
+        &files,
+        &parsed,
+        &opts,
+        &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
+    );
 
     // page_limit is a soft minimum: we always finish the current file, so we
     // get at least page_limit matches (no data loss) and at most
@@ -403,7 +462,15 @@ fn plain_text_file_offset_pagination() {
 
     loop {
         let parsed = parse_grep_query("unique_token");
-        let result = grep_search(&files, &parsed, &opts, &ContentCacheBudget::unlimited());
+        let result = grep_search(
+            &files,
+            &parsed,
+            &opts,
+            &ContentCacheBudget::unlimited(),
+            None,
+            None,
+            None,
+        );
 
         for m in &result.matches {
             let text = m.line_content.trim().to_string();
@@ -459,6 +526,9 @@ fn plain_text_line_numbers_are_correct() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 4);
@@ -479,7 +549,15 @@ fn plain_text_max_file_size_filter() {
     opts.max_file_size = 100; // Only allow files up to 100 bytes
 
     let parsed = parse_grep_query("match_me");
-    let result = grep_search(&files, &parsed, &opts, &ContentCacheBudget::unlimited());
+    let result = grep_search(
+        &files,
+        &parsed,
+        &opts,
+        &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
+    );
 
     assert_eq!(result.matches.len(), 0, "large file should be filtered out");
     assert_eq!(result.filtered_file_count, 0);
@@ -502,6 +580,9 @@ fn regex_basic_pattern() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -521,6 +602,9 @@ fn regex_capture_group_matching() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 2);
@@ -549,6 +633,9 @@ fn regex_dot_matches_any_char() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -573,6 +660,9 @@ fn regex_alternation() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 2);
@@ -596,6 +686,9 @@ fn regex_character_class() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 3);
@@ -624,6 +717,9 @@ fn regex_quantifiers() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 3, "should match foo, fooo, foooo");
@@ -644,6 +740,9 @@ fn regex_anchors() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -666,6 +765,9 @@ fn regex_anchors_multiword() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -688,6 +790,9 @@ fn regex_highlight_offsets_variable_length() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -716,6 +821,9 @@ fn regex_invalid_pattern_falls_back_to_literal() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // Fallback to literal: finds "name(" in "call name(arg)"
@@ -737,6 +845,9 @@ fn regex_invalid_pattern_falls_back_to_literal() {
         &parsed2,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(result2.matches.len(), 0);
     assert!(result2.regex_fallback_error.is_some());
@@ -758,6 +869,9 @@ fn regex_smart_case() {
         &parsed_lower,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(result_lower.matches.len(), 3);
 
@@ -768,6 +882,9 @@ fn regex_smart_case() {
         &parsed_upper,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(result_upper.matches.len(), 1);
 }
@@ -795,6 +912,9 @@ fn regex_across_multiple_files() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // Should match: fn main(), fn helper(), fn test_one(), fn test_two()
@@ -819,12 +939,18 @@ fn plain_text_and_regex_agree_on_simple_literal() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     let regex_result = grep_search(
         &files,
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(plain_result.matches.len(), regex_result.matches.len());
@@ -850,6 +976,9 @@ fn plain_text_escapes_what_regex_does_not() {
         &parsed_plain,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     let parsed_regex = parse_grep_query("\\$100");
     let regex_result = grep_search(
@@ -857,6 +986,9 @@ fn plain_text_escapes_what_regex_does_not() {
         &parsed_regex,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // Plain text should find "$100" literally
@@ -884,14 +1016,17 @@ fn grep_with_extension_constraint() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // Should only search .rs files
     for file in &result.files {
         assert!(
-            file.relative_path.ends_with(".rs"),
+            file.relative_path().ends_with(".rs"),
             "should only match .rs files, got: {}",
-            file.relative_path
+            file.relative_path()
         );
     }
     assert!(
@@ -917,6 +1052,9 @@ fn plain_text_bracket_is_literal() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -944,6 +1082,9 @@ fn grep_backslash_escapes_extension_filter() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(
         result_filter.files.len(),
@@ -958,6 +1099,9 @@ fn grep_backslash_escapes_extension_filter() {
         &parsed_escaped,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(
         result_literal.matches.len(),
@@ -981,6 +1125,9 @@ fn grep_backslash_escapes_path_segment() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(
         result.matches.len(),
@@ -1005,6 +1152,9 @@ fn grep_backslash_escapes_negation() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(result.matches.len(), 1);
     assert!(result.matches[0].line_content.contains("!test"));
@@ -1025,10 +1175,13 @@ fn grep_with_path_constraint() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
-    assert!(result.files[0].relative_path.starts_with("src/"));
+    assert!(result.files[0].relative_path().starts_with("src/"));
 }
 
 // ── Negated constraint tests ───────────────────────────────────────────
@@ -1049,6 +1202,9 @@ fn grep_with_negated_extension_constraint() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -1058,9 +1214,9 @@ fn grep_with_negated_extension_constraint() {
         result.matches.len()
     );
     assert!(
-        result.files[0].relative_path.ends_with(".ts"),
+        result.files[0].relative_path().ends_with(".ts"),
         "should only match .ts file, got: {}",
-        result.files[0].relative_path
+        result.files[0].relative_path()
     );
 }
 
@@ -1080,6 +1236,9 @@ fn grep_with_negated_path_constraint() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -1089,9 +1248,9 @@ fn grep_with_negated_path_constraint() {
         result.matches.len()
     );
     assert!(
-        result.files[0].relative_path.starts_with("tests/"),
+        result.files[0].relative_path().starts_with("tests/"),
         "should only match tests/ file, got: {}",
-        result.files[0].relative_path
+        result.files[0].relative_path()
     );
 }
 
@@ -1111,6 +1270,9 @@ fn grep_with_negated_text_constraint() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // "tests/helper.rs" contains "test" in path, should be excluded
@@ -1122,9 +1284,9 @@ fn grep_with_negated_text_constraint() {
     );
     for file in &result.files {
         assert!(
-            !file.relative_path.contains("test"),
+            !file.relative_path().contains("test"),
             "should not match files with 'test' in path, got: {}",
-            file.relative_path
+            file.relative_path()
         );
     }
 }
@@ -1147,6 +1309,9 @@ fn grep_empty_file_is_skipped() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1163,6 +1328,9 @@ fn grep_single_line_no_trailing_newline() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1184,6 +1352,9 @@ fn grep_unicode_content() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(result.matches.len(), 1);
     assert_eq!(result.matches[0].line_number, 2);
@@ -1194,6 +1365,9 @@ fn grep_unicode_content() {
         &parsed2,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
     assert_eq!(result2.matches.len(), 1);
     assert_eq!(result2.matches[0].line_number, 3);
@@ -1211,6 +1385,9 @@ fn grep_long_line_is_truncated() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1237,6 +1414,9 @@ fn regex_word_boundary() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -1262,6 +1442,9 @@ fn plain_text_question_mark_is_literal() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -1286,6 +1469,9 @@ fn plain_text_query_with_question_mark_in_word() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -1307,6 +1493,9 @@ fn regex_question_mark_is_quantifier() {
         &parsed,
         &regex_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -1333,6 +1522,9 @@ fn fuzzy_finds_exact_substring() {
         &parsed,
         &fuzzy_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -1360,6 +1552,9 @@ fn fuzzy_finds_scattered_characters() {
         &parsed,
         &fuzzy_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert!(
@@ -1380,6 +1575,9 @@ fn fuzzy_highlight_offsets_correct() {
         &parsed,
         &fuzzy_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1410,6 +1608,9 @@ fn fuzzy_unicode_char_indices() {
         &parsed,
         &fuzzy_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // Should fuzzy match "régulière" (with multi-byte é and è)
@@ -1429,6 +1630,9 @@ fn fuzzy_empty_query_returns_empty() {
         &parsed,
         &fuzzy_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // Empty query returns git-modified files, not fuzzy matches
@@ -1450,14 +1654,17 @@ fn fuzzy_with_extension_constraint() {
         &parsed,
         &fuzzy_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // Should only search .rs files
     for file in &result.files {
         assert!(
-            file.relative_path.ends_with(".rs"),
+            file.relative_path().ends_with(".rs"),
             "should only match .rs files, got: {}",
-            file.relative_path
+            file.relative_path()
         );
     }
 }
@@ -1476,7 +1683,15 @@ fn fuzzy_respects_page_limit() {
     opts.max_matches_per_file = 50;
 
     let parsed = parse_grep_query("target");
-    let result = grep_search(&files, &parsed, &opts, &ContentCacheBudget::unlimited());
+    let result = grep_search(
+        &files,
+        &parsed,
+        &opts,
+        &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
+    );
 
     // page_limit is a soft minimum: we always finish the current file, so we
     // get at least page_limit matches (no data loss) and at most
@@ -1512,7 +1727,15 @@ fn fuzzy_respects_max_matches_per_file() {
     opts.max_matches_per_file = 5;
 
     let parsed = parse_grep_query("match");
-    let result = grep_search(&files, &parsed, &opts, &ContentCacheBudget::unlimited());
+    let result = grep_search(
+        &files,
+        &parsed,
+        &opts,
+        &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
+    );
 
     assert_eq!(
         result.matches.len(),
@@ -1538,6 +1761,9 @@ fn fuzzy_filters_low_quality_matches() {
         &parsed,
         &fuzzy_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     // Should only get high-quality matches
@@ -1573,6 +1799,9 @@ fn fuzzy_exact_match_always_passes() {
         &parsed,
         &fuzzy_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(
@@ -1598,6 +1827,9 @@ fn fuzzy_score_is_captured() {
         &parsed,
         &fuzzy_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1625,6 +1857,9 @@ fn fuzzy_score_is_none_in_plain_mode() {
         &parsed,
         &plain_opts(),
         &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
     );
 
     assert_eq!(result.matches.len(), 1);
@@ -1634,5 +1869,35 @@ fn fuzzy_score_is_none_in_plain_mode() {
     assert!(
         m.fuzzy_score.is_none(),
         "fuzzy_score should be None in plain text mode"
+    );
+}
+
+/// Regression: memmem prefilter rejected files where content casing differed
+/// from the query, even under smart_case. E.g. "vfio-kvm" failed to find
+/// "VFIO-KVM" because the lowercased finder did a case-sensitive scan.
+#[test]
+fn plain_text_smart_case_finds_uppercase_content_with_lowercase_query() {
+    let tmp = TempDir::new().unwrap();
+    let files = vec![create_file(
+        tmp.path(),
+        "driver.c",
+        "// VFIO-KVM integration\nstatic int init(void) {}\n",
+    )];
+
+    let parsed = parse_grep_query("vfio-kvm");
+    let result = grep_search(
+        &files,
+        &parsed,
+        &plain_opts(),
+        &ContentCacheBudget::unlimited(),
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(
+        result.matches.len(),
+        1,
+        "lowercase query should case-insensitively match 'VFIO-KVM'"
     );
 }
