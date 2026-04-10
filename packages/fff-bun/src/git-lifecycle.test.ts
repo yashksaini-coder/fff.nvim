@@ -309,6 +309,48 @@ describe.skipIf(process.platform === "win32")("Git lifecycle integration", () =>
     expect(result.value.items.length).toBe(0);
   });
 
+  test("file in a newly created directory is discoverable", async () => {
+    // Create a brand-new directory that didn't exist during the initial scan,
+    // then add a file inside it. The watcher must dynamically pick up the new
+    // directory and index the file.
+    mkdirSync(join(tmpDir, "lib"));
+    writeFileSync(
+      join(tmpDir, "lib", "helpers.ts"),
+      "export function add(a: number, b: number) { return a + b; }\n",
+    );
+
+    const helpers = await waitForFile(finder, "helpers.ts");
+    expect(helpers).toBeDefined();
+    expect(helpers?.relativePath).toBe("lib/helpers.ts");
+  });
+
+  test("files in gitignored directories are not indexed", async () => {
+    // Commit a .gitignore rule first so it's established repo state before
+    // the ignored directory is created. This tests the watch-level filtering
+    // (is_path_ignored in the debouncer callback), not a rescan triggered
+    // by a .gitignore change.
+    writeFileSync(join(tmpDir, ".gitignore"), "build_output/\n");
+    git(tmpDir, "add", ".gitignore");
+    git(tmpDir, "commit", "-m", "add gitignore");
+
+    // Wait for the watcher to settle after the commit.
+    await waitForFile(finder, ".gitignore");
+
+    // Now create the ignored directory and add a file inside it.
+    mkdirSync(join(tmpDir, "build_output"));
+    writeFileSync(join(tmpDir, "build_output", "artifact.bin"), "should not appear\n");
+
+    // Create a non-ignored file as a synchronisation barrier — once it's
+    // indexed, the watcher has processed the same batch of events.
+    writeFileSync(join(tmpDir, "canary.txt"), "visible\n");
+    const canary = await waitForFile(finder, "canary.txt");
+    expect(canary).toBeDefined();
+
+    // The ignored file must NOT appear in the index.
+    const artifact = findFile(finder, "artifact.bin");
+    expect(artifact).toBeUndefined();
+  });
+
   test("full add-commit cycle for subdirectory file", async () => {
     git(tmpDir, "add", "src/utils.rs");
 

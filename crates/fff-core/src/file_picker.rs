@@ -101,14 +101,21 @@ pub struct FuzzySearchOptions<'a> {
 
 #[derive(Debug, Clone)]
 struct FileSync {
+    git_workdir: Option<PathBuf>,
     /// All files: `files[..base_count]` are sorted by path (base index, used
-    /// for binary search and bigram); `files[base_count..]` are overflow files
-    /// added since the last full reindex. Deletions in the base use tombstones
-    /// (`is_deleted = true`) to keep bigram indices stable.
+    /// for binary search and bigram);
+    ///
+    /// `files[base_count..]` are overflow files added since the last full reindex.
+    /// Deletions in the base use tombstones (`is_deleted = true`) to keep bigram indices stable.
     files: Vec<FileItem>,
     /// Number of base files (the sorted prefix used for binary search / bigram).
     base_count: usize,
-    pub git_workdir: Option<PathBuf>,
+    /// Compressed bigram inverted index built during the post-scan phase.
+    /// Lives here so that replacing `FileSync` on rescan automatically drops
+    /// the stale index (bigram file indices are positions in `files`).
+    bigram_index: Option<Arc<BigramFilter>>,
+    /// Overlay tracking file mutations since the bigram index was built.
+    bigram_overlay: Option<Arc<parking_lot::RwLock<BigramOverlay>>>,
 }
 
 impl FileSync {
@@ -117,6 +124,8 @@ impl FileSync {
             files: Vec::new(),
             base_count: 0,
             git_workdir: None,
+            bigram_index: None,
+            bigram_overlay: None,
         }
     }
 
@@ -152,6 +161,8 @@ impl FileSync {
 
     /// Find a file in the overflow portion by path (linear scan).
     /// Returns the absolute index into `files`.
+    ///
+    /// the overflowed items are not ordered so we can not use binary search
     fn find_overflow_index(&self, path: &Path) -> Option<usize> {
         self.files[self.base_count..]
             .iter()
@@ -314,8 +325,15 @@ pub struct FilePicker {
     warmup_mmap_cache: bool,
     watch: bool,
     cancelled: Arc<AtomicBool>,
-    bigram_index: Option<Arc<BigramFilter>>,
-    bigram_overlay: Option<Arc<parking_lot::RwLock<BigramOverlay>>>,
+    // This is a soft lock that we use to prevent rescan be triggered while the
+    // bigram indexing is in progress. This allows to keep some of the unsafe magic
+    // relying on the immutabillity of the files vec after the index without worrying
+    // that the vec is going to be dropped before the indexing is finished
+    //
+    // In addition to that rescan is likely triggered by something unnecessary
+    // before the indexing is finished it means that fff is dogfooded the index either
+    // by the UI rendering preview or simply by walking the directory. Which is not good anyway
+    post_scan_busy: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for FilePicker {
@@ -350,11 +368,11 @@ impl FilePicker {
     }
 
     pub fn bigram_index(&self) -> Option<&BigramFilter> {
-        self.bigram_index.as_deref()
+        self.sync_data.bigram_index.as_deref()
     }
 
     pub fn bigram_overlay(&self) -> Option<&parking_lot::RwLock<BigramOverlay>> {
-        self.bigram_overlay.as_deref()
+        self.sync_data.bigram_overlay.as_deref()
     }
 
     pub fn get_file_mut(&mut self, index: usize) -> Option<&mut FileItem> {
@@ -362,8 +380,8 @@ impl FilePicker {
     }
 
     pub fn set_bigram_index(&mut self, index: BigramFilter, overlay: BigramOverlay) {
-        self.bigram_index = Some(Arc::new(index));
-        self.bigram_overlay = Some(Arc::new(parking_lot::RwLock::new(overlay)));
+        self.sync_data.bigram_index = Some(Arc::new(index));
+        self.sync_data.bigram_overlay = Some(Arc::new(parking_lot::RwLock::new(overlay)));
     }
 
     pub fn git_root(&self) -> Option<&Path> {
@@ -379,6 +397,39 @@ impl FilePicker {
 
     pub fn get_overflow_files(&self) -> &[FileItem] {
         self.sync_data.overflow_files()
+    }
+
+    /// Extracts all unique ancestor directories from the indexed file list.
+    pub fn extract_watch_dirs(&self) -> Vec<PathBuf> {
+        let files = self.sync_data.files();
+        let base = self.base_path.as_path();
+        let mut dirs = Vec::with_capacity(files.len() / 4);
+        let mut current = self.base_path.clone();
+
+        for file in files {
+            let Some(parent) = file.as_path().parent() else {
+                continue;
+            };
+            if parent == current.as_path() {
+                continue;
+            }
+
+            // Pop up to the common ancestor of current and parent.
+            while current.as_path() != base && !parent.starts_with(&current) {
+                current.pop();
+            }
+
+            // Push down to parent, emitting each new directory level.
+            let Ok(remainder) = parent.strip_prefix(&current) else {
+                continue;
+            };
+            for component in remainder.components() {
+                current.push(component);
+                dirs.push(current.clone());
+            }
+        }
+
+        dirs
     }
 
     /// Create a new FilePicker from options.
@@ -401,13 +452,12 @@ impl FilePicker {
         Ok(FilePicker {
             background_watcher: None,
             base_path: path,
-            bigram_index: None,
-            bigram_overlay: None,
             cache_budget: Arc::new(initial_budget),
             cancelled: Arc::new(AtomicBool::new(false)),
             has_explicit_cache_budget: has_explicit_budget,
             is_scanning: Arc::new(AtomicBool::new(false)),
             mode: options.mode,
+            post_scan_busy: Arc::new(AtomicBool::new(false)),
             scanned_files_count: Arc::new(AtomicUsize::new(0)),
             sync_data: FileSync::new(),
             warmup_mmap_cache: options.warmup_mmap_cache,
@@ -442,6 +492,7 @@ impl FilePicker {
         let watcher_ready = Arc::clone(&picker.watcher_ready);
         let synced_files_count = Arc::clone(&picker.scanned_files_count);
         let cancelled = Arc::clone(&picker.cancelled);
+        let post_scan_busy = Arc::clone(&picker.post_scan_busy);
         let path = picker.base_path.clone();
 
         {
@@ -460,6 +511,7 @@ impl FilePicker {
             shared_picker,
             shared_frecency,
             cancelled,
+            post_scan_busy,
         );
 
         Ok(())
@@ -518,12 +570,14 @@ impl FilePicker {
         shared_frecency: &SharedFrecency,
     ) -> Result<(), Error> {
         let git_workdir = self.sync_data.git_workdir.clone();
+        let watch_dirs = self.extract_watch_dirs();
         let watcher = BackgroundWatcher::new(
             self.base_path.clone(),
             git_workdir,
             shared_picker.clone(),
             shared_frecency.clone(),
             self.mode,
+            watch_dirs,
         )?;
         self.background_watcher = Some(watcher);
         self.watcher_ready.store(true, Ordering::Release);
@@ -621,13 +675,13 @@ impl FilePicker {
 
     /// Perform a live grep search across indexed files with a pre-parsed query.
     pub fn grep(&self, query: &FFFQuery<'_>, options: &GrepSearchOptions) -> GrepResult<'_> {
-        let overlay_guard = self.bigram_overlay.as_ref().map(|o| o.read());
+        let overlay_guard = self.sync_data.bigram_overlay.as_ref().map(|o| o.read());
         grep_search(
             self.get_files(),
             query,
             options,
             self.cache_budget(),
-            self.bigram_index.as_deref(),
+            self.sync_data.bigram_index.as_deref(),
             overlay_guard.as_deref(),
             Some(&self.cancelled),
         )
@@ -645,7 +699,7 @@ impl FilePicker {
             query,
             options,
             self.cache_budget(),
-            self.bigram_index.as_deref(),
+            self.sync_data.bigram_index.as_deref(),
             None,
             Some(&self.cancelled),
         )
@@ -659,7 +713,7 @@ impl FilePicker {
             scanned_files_count: scanned_count,
             is_scanning,
             is_watcher_ready: self.watcher_ready.load(Ordering::Relaxed),
-            is_warmup_complete: self.bigram_index.is_some(),
+            is_warmup_complete: self.sync_data.bigram_index.is_some(),
         }
     }
 
@@ -760,6 +814,10 @@ impl FilePicker {
     pub fn on_create_or_modify(&mut self, path: impl AsRef<Path> + Debug) -> Option<&FileItem> {
         let path = path.as_ref();
 
+        // Clone the overlay Arc upfront so we can access it independently of
+        // the mutable borrow on sync_data.files (just a refcount bump).
+        let overlay = self.sync_data.bigram_overlay.clone();
+
         // Check if this is a tombstoned base file being re-created.
         if let Ok(pos) = self.sync_data.find_file_index(path) {
             let file = self.sync_data.get_file_mut(pos)?;
@@ -798,7 +856,7 @@ impl FilePicker {
             }
 
             // Update the bigram overlay for this modified file.
-            if let Some(ref overlay) = self.bigram_overlay
+            if let Some(ref overlay) = overlay
                 && let Ok(content) = std::fs::read(path)
             {
                 overlay.write().modify_file(pos, &content);
@@ -821,14 +879,6 @@ impl FilePicker {
                     file.invalidate_mmap(&self.cache_budget);
                 }
             }
-            // Update overflow entry in overlay.
-            if let Some(ref overlay) = self.bigram_overlay
-                && let Ok(content) = std::fs::read(path)
-            {
-                let overflow_pos = abs_pos - self.sync_data.base_count;
-                let bigrams = crate::bigram_filter::extract_bigrams(&content);
-                overlay.write().update_added(overflow_pos, bigrams);
-            }
             return Some(&self.sync_data.files[abs_pos]);
         }
 
@@ -842,11 +892,6 @@ impl FilePicker {
         let file_item = FileItem::new(path.to_path_buf(), &self.base_path, None);
         self.sync_data.files.push(file_item);
 
-        if let Some(ref overlay) = self.bigram_overlay {
-            let content = std::fs::read(path).unwrap_or_default();
-            overlay.write().add_file(&content);
-        }
-
         self.sync_data.files.last()
     }
 
@@ -858,7 +903,7 @@ impl FilePicker {
                 let file = &mut self.sync_data.files[index];
                 file.set_deleted(true);
                 file.invalidate_mmap(&self.cache_budget);
-                if let Some(ref overlay) = self.bigram_overlay {
+                if let Some(ref overlay) = self.sync_data.bigram_overlay {
                     overlay.write().delete_file(index);
                 }
                 true
@@ -867,11 +912,7 @@ impl FilePicker {
                 // Check overflow for added files — these can be removed directly
                 // since they aren't in the base bigram index.
                 if let Some(abs_pos) = self.sync_data.find_overflow_index(path) {
-                    let overflow_pos = abs_pos - self.sync_data.base_count;
                     self.sync_data.files.remove(abs_pos);
-                    if let Some(ref overlay) = self.bigram_overlay {
-                        overlay.write().remove_added(overflow_pos);
-                    }
                     true
                 } else {
                     false
@@ -902,6 +943,14 @@ impl FilePicker {
     pub fn trigger_rescan(&mut self, shared_frecency: &SharedFrecency) -> Result<(), Error> {
         if self.is_scanning.load(Ordering::Relaxed) {
             debug!("Scan already in progress, skipping trigger_rescan");
+            return Ok(());
+        }
+
+        // The post-scan warmup + bigram phase holds a raw pointer into the
+        // current files Vec. Replacing sync_data now would free that memory.
+        // Skip — the background watcher will retry on the next event.
+        if self.post_scan_busy.load(Ordering::Acquire) {
+            debug!("Post-scan bigram build in progress, skipping rescan");
             return Ok(());
         }
 
@@ -1000,6 +1049,7 @@ fn spawn_scan_and_watcher(
     shared_picker: SharedPicker,
     shared_frecency: SharedFrecency,
     cancelled: Arc<AtomicBool>,
+    post_scan_busy: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
         // scan_signal is already `true` (set by the caller before spawning)
@@ -1055,12 +1105,19 @@ fn spawn_scan_and_watcher(
         }
 
         if watch && !cancelled.load(Ordering::Acquire) {
+            let watch_dirs = shared_picker
+                .read()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|picker| picker.extract_watch_dirs()))
+                .unwrap_or_default();
+
             match BackgroundWatcher::new(
                 base_path,
                 git_workdir,
                 shared_picker.clone(),
                 shared_frecency.clone(),
                 mode,
+                watch_dirs,
             ) {
                 Ok(watcher) => {
                     info!("Background file watcher initialized successfully");
@@ -1091,6 +1148,7 @@ fn spawn_scan_and_watcher(
         watcher_ready.store(true, Ordering::Release);
 
         if warmup_mmap_cache && !cancelled.load(Ordering::Acquire) {
+            post_scan_busy.store(true, Ordering::Release);
             let phase_start = std::time::Instant::now();
 
             // Scale cache limits based on repo size (skip if caller provided an explicit budget).
@@ -1107,7 +1165,9 @@ fn spawn_scan_and_watcher(
             }
 
             // SAFETY: The file index Vec is not resized between the initial scan
-            // completing and the warmup + bigram phase finishing.
+            // completing and the warmup + bigram phase finishing because
+            // `post_scan_busy` prevents concurrent rescans from replacing
+            // sync_data while we hold the raw pointer.
             let files_snapshot: Option<(&[FileItem], Arc<ContentCacheBudget>)> =
                 if !cancelled.load(Ordering::Acquire) {
                     let guard = shared_picker.read().ok();
@@ -1117,7 +1177,9 @@ fn spawn_scan_and_watcher(
                             let ptr = files.as_ptr();
                             let len = files.len();
                             let budget = Arc::clone(&picker.cache_budget);
-                            // SAFETY: see comment above — Vec is stable during this window.
+                            // SAFETY: post_scan_busy flag blocks trigger_rescan and
+                            // background watcher rescans from replacing sync_data,
+                            // so the Vec backing this slice stays alive.
                             let static_files: &[FileItem] =
                                 unsafe { std::slice::from_raw_parts(ptr, len) };
                             (static_files, budget)
@@ -1160,13 +1222,15 @@ fn spawn_scan_and_watcher(
                         }
 
                         let base_count = picker.sync_data.base_count;
-                        picker.bigram_index = Some(Arc::new(index));
-                        picker.bigram_overlay = Some(Arc::new(parking_lot::RwLock::new(
+                        picker.sync_data.bigram_index = Some(Arc::new(index));
+                        picker.sync_data.bigram_overlay = Some(Arc::new(parking_lot::RwLock::new(
                             BigramOverlay::new(base_count),
                         )));
                     }
                 }
             }
+
+            post_scan_busy.store(false, Ordering::Release);
 
             info!(
                 "Post-scan warmup + bigram total: {:.2}s",
@@ -1307,8 +1371,9 @@ pub fn build_bigram_index(
     let skip_index = skip_builder.compress(Some(12));
     index.set_skip_index(skip_index);
 
-    // The builder just freed ~276 MB (for 500k files) of atomic bitsets.
-    // Hint the allocator to return those pages to the OS.
+    // The builders' flat buffers were freed by compress() above (single
+    // deallocation each). Hint the allocator to return pages from other
+    // per-thread allocations (file reads, sort buffers) during the build.
     hint_allocator_collect();
 
     info!(
@@ -1534,6 +1599,8 @@ fn walk_filesystem(
             files,
             base_count,
             git_workdir,
+            bigram_index: None,
+            bigram_overlay: None,
         },
         git_handle,
     })
@@ -1650,9 +1717,11 @@ pub(crate) fn detect_binary_content(content: &[u8]) -> bool {
 fn hint_allocator_collect() {
     #[cfg(feature = "mimalloc-collect")]
     {
-        // Collect every rayon worker thread's mimalloc heap — the bigram
-        // builder allocated across all of them.
-        rayon::broadcast(|_| unsafe { libmimalloc_sys::mi_collect(true) });
+        // Collect BACKGROUND_THREAD_POOL workers — that's where the bigram
+        // builder allocated memory. `rayon::broadcast` would target the global
+        // pool, which is the wrong set of threads.
+        BACKGROUND_THREAD_POOL.broadcast(|_| unsafe { libmimalloc_sys::mi_collect(true) });
+
         // Main thread too.
         unsafe { libmimalloc_sys::mi_collect(true) };
     }

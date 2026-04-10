@@ -55,6 +55,7 @@ local M = {}
 --- @field time_budget_ms number
 --- @field modes string[]
 --- @field classify_definitions boolean
+--- @field trim_whitespace boolean
 
 --- @class FffConfig
 --- @field base_path string
@@ -334,6 +335,7 @@ local function init()
       time_budget_ms = 150, -- Max search time in ms per call (prevents UI freeze, 0 = no limit)
       modes = { 'plain', 'regex', 'fuzzy' }, -- Available grep modes and their cycling order
       classify_definitions = false, -- Mark definition lines like fn/struct/class
+      trim_whitespace = false, -- Strip leading whitespace from matched lines (useful for cleaner display)
     },
   }
 
