@@ -2431,6 +2431,8 @@ mod tests {
             &options_with_defs,
             &ContentCacheBudget::unlimited(),
             None,
+            None,
+            None,
         );
         // All matches for a given file must be contiguous (no interleaving).
         if !result_defs.matches.is_empty() {
